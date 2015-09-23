@@ -198,6 +198,7 @@ UPROGS=\
 	_usertests\
 	_wc\
 	_zombie\
+	_halt\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)
@@ -209,7 +210,8 @@ clean:
 	rm -rf build
 	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg \
 	*.o *.d *.asm *.sym vectors.S bootblock entryother \
-	drivers/*.o drivers/*.d programs/*.o programs/*.d lib/*.o lib/*.d user/*.o user/*.d \
+	drivers/*.o drivers/*.d programs/*.o programs/*.d lib/*.o \
+	lib/*.d user/*.o user/*.d kern/*.d kern/*.o\
 	initcode initcode.out kernel xv6.img fs.img kernelmemfs mkfs \
 	.gdbinit \
 	$(UPROGS)
