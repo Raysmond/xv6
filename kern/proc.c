@@ -283,7 +283,9 @@ scheduler(void)
       proc = p;
       switchuvm(p);
       p->state = RUNNING;
+      // cprintf("Running %s [pid %d]\n", p->name, p->pid);
       swtch(&cpu->scheduler, proc->context);
+      // cprintf("Exiting %s [pid %d]\n", p->name, p->pid);
       switchkvm();
 
       // Process is done running for now.

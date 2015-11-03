@@ -15,4 +15,5 @@ kernelmemfs
 mkfs
 .gdbinit
 .idea
+.tags
 CMakeLists.txt
