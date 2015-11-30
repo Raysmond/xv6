@@ -6,6 +6,7 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+//#include "heap.h"
 
 struct {
   struct spinlock lock;
@@ -20,10 +21,45 @@ extern void trapret(void);
 
 static void wakeup1(void *chan);
 
+#define PQUEUE_MAX    NPROC*2
+
+static int pqueue_head, pqueue_tail;
+static struct proc *pqueue[PQUEUE_MAX];
+// will overflow after many times enqueue.... 
+// well, keep it simple, and quick
+
+static void pqueue_init()
+{
+  pqueue_head = pqueue_tail = 0;
+}
+
+static int pqueue_size() 
+{
+  return (pqueue_tail - pqueue_head);
+}
+
+static int penqueue(struct proc *p)
+{
+  if(pqueue_size() == PQUEUE_MAX) return -1;
+  pqueue[(pqueue_tail++) % PQUEUE_MAX] = p;
+  return 0;
+}
+
+static struct proc* pdequeue()
+{
+  struct proc *p;
+  if(pqueue_size() == 0) return 0;
+  else{
+    p = pqueue[(pqueue_head++) % PQUEUE_MAX]; 
+    return p;
+  }
+}
+
 void
 pinit(void)
 {
   initlock(&ptable.lock, "ptable");
+  pqueue_init();
 }
 
 //PAGEBREAK: 32
@@ -69,7 +105,8 @@ found:
   p->context = (struct context*)sp;
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
-
+  p->wakeuptime = 0;
+  p->priority = 1;
   return p;
 }
 
@@ -100,6 +137,7 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+  penqueue(p);
 }
 
 // Grow current process's memory by n bytes.
@@ -161,6 +199,7 @@ fork(void)
   // lock to force the compiler to emit the np->state write last.
   acquire(&ptable.lock);
   np->state = RUNNABLE;
+  penqueue(np);
   release(&ptable.lock);
   
   return pid;
@@ -174,6 +213,8 @@ exit(void)
 {
   struct proc *p;
   int fd;
+
+  cprintf("%s exiting, wakeuptime %d\n",proc->name,proc->wakeuptime);
 
   if(proc == initproc)
     panic("init exiting");
@@ -273,17 +314,18 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
-
+    p = pdequeue();
+    if(p){
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
       proc = p;
+
+      cprintf("%s run by cpu %d\n",proc->name,cpunum());
       switchuvm(p);
       p->state = RUNNING;
       // cprintf("Running %s [pid %d]\n", p->name, p->pid);
+      //cprintf("\n                         swtch from scheduler to %s\n",proc->name);
       swtch(&cpu->scheduler, proc->context);
       // cprintf("Exiting %s [pid %d]\n", p->name, p->pid);
       switchkvm();
@@ -293,7 +335,6 @@ scheduler(void)
       proc = 0;
     }
     release(&ptable.lock);
-
   }
 }
 
@@ -313,6 +354,7 @@ sched(void)
   if(readeflags()&FL_IF)
     panic("sched interruptible");
   intena = cpu->intena;
+  //cprintf("\n                         swtch from %s to scheduler\n",proc->name);
   swtch(&proc->context, cpu->scheduler);
   cpu->intena = intena;
 }
@@ -323,6 +365,7 @@ yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
   proc->state = RUNNABLE;
+  penqueue(proc);
   sched();
   release(&ptable.lock);
 }
@@ -353,6 +396,8 @@ forkret(void)
 void
 sleep(void *chan, struct spinlock *lk)
 {
+  //cprintf("%s go sleep\n",proc->name);
+
   if(proc == 0)
     panic("sleep");
 
@@ -394,8 +439,12 @@ wakeup1(void *chan)
   struct proc *p;
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
+    if(p->state == SLEEPING && p->chan == chan){
       p->state = RUNNABLE;
+      penqueue(p);
+      p->wakeuptime++;
+      //cprintf("%s waked\n",p->name);
+    }
 }
 
 // Wake up all processes sleeping on chan.
@@ -420,8 +469,10 @@ kill(int pid)
     if(p->pid == pid){
       p->killed = 1;
       // Wake process from sleep if necessary.
-      if(p->state == SLEEPING)
+      if(p->state == SLEEPING){
         p->state = RUNNABLE;
+        penqueue(p);
+      }
       release(&ptable.lock);
       return 0;
     }
