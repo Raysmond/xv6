@@ -13,7 +13,5 @@ initcode.out
 kernel
 kernelmemfs
 mkfs
-.gdbinit
-.idea
-.tags
+.*
 CMakeLists.txt
