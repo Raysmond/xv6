@@ -211,7 +211,7 @@ exit(void)
   struct proc *p;
   int fd;
 
-  // cprintf("%s exiting, wakeuptime %d\n",proc->name,proc->wakeuptime);
+  cprintf("pid %d name %s exiting, prio %d\n",proc->pid,proc->name,proc->priority);
 
   if(proc == initproc)
     panic("init exiting");
@@ -314,7 +314,9 @@ scheduler(void)
 
     p = pdequeue();
     if(p){
-      cprintf("cpu %d get process %s\n",cpunum(),p->name);
+
+      cprintf("cpu %d get process %s, process prio = %d\n",cpunum(),p->name,p->priority);
+
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.

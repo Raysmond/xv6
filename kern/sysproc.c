@@ -115,3 +115,13 @@ sys_getpte(void)
   uint *ret = (uint *) walkpgdir(proc->pgdir,(void *)va, 0);
   return (int) *ret;
 }
+
+int
+sys_setprio(void)
+{
+  int prio;
+  if(argint(0, &prio) < 0)
+    return -1;
+  proc->priority = prio;
+  return 0;
+}

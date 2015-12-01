@@ -25,6 +25,7 @@ int sleep(int);
 int uptime(void);
 int halt(void);
 uint getpte(int);
+int setprio();
 
 // ulib.c
 int stat(char*, struct stat*);
