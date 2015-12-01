@@ -6,7 +6,7 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
-//#include "heap.h"
+#include "heap.h"
 
 struct {
   struct spinlock lock;
@@ -23,34 +23,30 @@ static void wakeup1(void *chan);
 
 #define PQUEUE_MAX    NPROC*2
 
-static int pqueue_head, pqueue_tail;
-static struct proc *pqueue[PQUEUE_MAX];
-// will overflow after many times enqueue.... 
-// well, keep it simple, and quick
-
 static void pqueue_init()
 {
-  pqueue_head = pqueue_tail = 0;
+  pheap_init();
 }
 
 static int pqueue_size() 
 {
-  return (pqueue_tail - pqueue_head);
+  return pheap.size;
 }
 
 static int penqueue(struct proc *p)
 {
   if(pqueue_size() == PQUEUE_MAX) return -1;
-  pqueue[(pqueue_tail++) % PQUEUE_MAX] = p;
+  pheap_push(p);
   return 0;
 }
 
 static struct proc* pdequeue()
 {
   struct proc *p;
+  
   if(pqueue_size() == 0) return 0;
   else{
-    p = pqueue[(pqueue_head++) % PQUEUE_MAX]; 
+    p = pheap_pop();
     return p;
   }
 }
@@ -107,6 +103,7 @@ found:
   p->context->eip = (uint)forkret;
   p->wakeuptime = 0;
   p->priority = 1;
+  p->pass = 0;
   return p;
 }
 
@@ -214,7 +211,7 @@ exit(void)
   struct proc *p;
   int fd;
 
-  cprintf("%s exiting, wakeuptime %d\n",proc->name,proc->wakeuptime);
+  // cprintf("%s exiting, wakeuptime %d\n",proc->name,proc->wakeuptime);
 
   if(proc == initproc)
     panic("init exiting");
@@ -314,14 +311,16 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+
     p = pdequeue();
     if(p){
+      cprintf("cpu %d get process %s\n",cpunum(),p->name);
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
       proc = p;
 
-      cprintf("%s run by cpu %d\n",proc->name,cpunum());
+      // cprintf("%s run by cpu %d\n",proc->name,cpunum());
       switchuvm(p);
       p->state = RUNNING;
       // cprintf("Running %s [pid %d]\n", p->name, p->pid);
