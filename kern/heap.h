@@ -57,7 +57,7 @@ pheap_init()
 int
 pheap_push(struct proc* p)
 {
-     if(pheap.size == NPROC)
+     if(pheap.size >= NPROC)
           panic("pheap is full");
 
      p->pass += STRIDE_MAX / p->priority;

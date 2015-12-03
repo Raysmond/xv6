@@ -15,6 +15,12 @@ int
 main(int argc, char *argv[])
 {
   int i,j;
+
+  if(argc != 3){
+    printf(1, "Usage, loop n prio\nLoop for n^2 times with prio priority(priority is between 1 and 100)\n");
+    exit();
+  }
+
   int n = getd(argv[1]);
   int prio = getd(argv[2]);
   setprio(prio);

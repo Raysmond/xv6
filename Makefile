@@ -199,8 +199,6 @@ UPROGS=\
 	_wc\
 	_zombie\
 	_halt\
-	_debug\
-	_showmappings\
 	_loop\
 
 fs.img: mkfs README $(UPROGS)

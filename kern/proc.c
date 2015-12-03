@@ -8,6 +8,9 @@
 #include "spinlock.h"
 #include "heap.h"
 
+//uncomment it to use xv6 original scheduling method
+//#define __ORIGINAL_SCHED__
+
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
@@ -21,6 +24,8 @@ extern void trapret(void);
 
 static void wakeup1(void *chan);
 
+// Stride Scheduling
+#ifndef __ORIGINAL_SCHED__
 #define PQUEUE_MAX    NPROC*2
 
 static void pqueue_init()
@@ -50,12 +55,15 @@ static struct proc* pdequeue()
     return p;
   }
 }
+#endif
 
 void
 pinit(void)
 {
   initlock(&ptable.lock, "ptable");
+#ifndef __ORIGINAL_SCHED__
   pqueue_init();
+#endif
 }
 
 //PAGEBREAK: 32
@@ -101,7 +109,6 @@ found:
   p->context = (struct context*)sp;
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
-  p->wakeuptime = 0;
   p->priority = 1;
   p->pass = 0;
   return p;
@@ -134,7 +141,9 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+#ifndef __ORIGINAL_SCHED__
   penqueue(p);
+#endif
 }
 
 // Grow current process's memory by n bytes.
@@ -196,7 +205,9 @@ fork(void)
   // lock to force the compiler to emit the np->state write last.
   acquire(&ptable.lock);
   np->state = RUNNABLE;
+#ifndef __ORIGINAL_SCHED__
   penqueue(np);
+#endif
   release(&ptable.lock);
   
   return pid;
@@ -210,8 +221,6 @@ exit(void)
 {
   struct proc *p;
   int fd;
-
-  cprintf("pid %d name %s exiting, prio %d\n",proc->pid,proc->name,proc->priority);
 
   if(proc == initproc)
     panic("init exiting");
@@ -312,9 +321,16 @@ scheduler(void)
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
 
+#ifndef __ORIGINAL_SCHED__
     p = pdequeue();
     if(p){
+#else
+    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if(p->state != RUNNABLE)
+        continue;
+#endif
 
+      // For debug, checking the scheduled process priority
       cprintf("cpu %d get process %s, process prio = %d\n",cpunum(),p->name,p->priority);
 
       // Switch to chosen process.  It is the process's job
@@ -322,13 +338,9 @@ scheduler(void)
       // before jumping back to us.
       proc = p;
 
-      // cprintf("%s run by cpu %d\n",proc->name,cpunum());
       switchuvm(p);
       p->state = RUNNING;
-      // cprintf("Running %s [pid %d]\n", p->name, p->pid);
-      //cprintf("\n                         swtch from scheduler to %s\n",proc->name);
       swtch(&cpu->scheduler, proc->context);
-      // cprintf("Exiting %s [pid %d]\n", p->name, p->pid);
       switchkvm();
 
       // Process is done running for now.
@@ -355,7 +367,6 @@ sched(void)
   if(readeflags()&FL_IF)
     panic("sched interruptible");
   intena = cpu->intena;
-  //cprintf("\n                         swtch from %s to scheduler\n",proc->name);
   swtch(&proc->context, cpu->scheduler);
   cpu->intena = intena;
 }
@@ -366,7 +377,9 @@ yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
   proc->state = RUNNABLE;
+#ifndef __ORIGINAL_SCHED__
   penqueue(proc);
+#endif
   sched();
   release(&ptable.lock);
 }
@@ -397,7 +410,6 @@ forkret(void)
 void
 sleep(void *chan, struct spinlock *lk)
 {
-  //cprintf("%s go sleep\n",proc->name);
 
   if(proc == 0)
     panic("sleep");
@@ -442,9 +454,9 @@ wakeup1(void *chan)
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
     if(p->state == SLEEPING && p->chan == chan){
       p->state = RUNNABLE;
+#ifndef __ORIGINAL_SCHED__
       penqueue(p);
-      p->wakeuptime++;
-      //cprintf("%s waked\n",p->name);
+#endif
     }
 }
 
@@ -472,7 +484,9 @@ kill(int pid)
       // Wake process from sleep if necessary.
       if(p->state == SLEEPING){
         p->state = RUNNABLE;
+#ifndef __ORIGINAL_SCHED__
         penqueue(p);
+#endif
       }
       release(&ptable.lock);
       return 0;
