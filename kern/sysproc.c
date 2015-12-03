@@ -7,6 +7,8 @@
 #include "mmu.h"
 #include "proc.h"
 
+extern pde_t *kpgdir;
+
 int
 sys_fork(void)
 {
@@ -101,5 +103,25 @@ sys_halt(void)
   char *p = "Shutdown";
   for( ; *p; p++)
     outw(0xB004, 0x2000);
+  return 0;
+}
+
+int
+sys_getpte(void)
+{
+  int va;
+  if(argint(0, &va) < 0)
+    return -1;
+  uint *ret = (uint *) walkpgdir(proc->pgdir,(void *)va, 0);
+  return (int) *ret;
+}
+
+int
+sys_setprio(void)
+{
+  int prio;
+  if(argint(0, &prio) < 0)
+    return -1;
+  proc->priority = prio;
   return 0;
 }

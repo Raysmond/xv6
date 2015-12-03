@@ -6,6 +6,10 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "heap.h"
+
+//uncomment it to use xv6 original scheduling method
+//#define __ORIGINAL_SCHED__
 
 struct {
   struct spinlock lock;
@@ -20,10 +24,46 @@ extern void trapret(void);
 
 static void wakeup1(void *chan);
 
+// Stride Scheduling
+#ifndef __ORIGINAL_SCHED__
+#define PQUEUE_MAX    NPROC*2
+
+static void pqueue_init()
+{
+  pheap_init();
+}
+
+static int pqueue_size() 
+{
+  return pheap.size;
+}
+
+static int penqueue(struct proc *p)
+{
+  if(pqueue_size() == PQUEUE_MAX) return -1;
+  pheap_push(p);
+  return 0;
+}
+
+static struct proc* pdequeue()
+{
+  struct proc *p;
+  
+  if(pqueue_size() == 0) return 0;
+  else{
+    p = pheap_pop();
+    return p;
+  }
+}
+#endif
+
 void
 pinit(void)
 {
   initlock(&ptable.lock, "ptable");
+#ifndef __ORIGINAL_SCHED__
+  pqueue_init();
+#endif
 }
 
 //PAGEBREAK: 32
@@ -69,7 +109,8 @@ found:
   p->context = (struct context*)sp;
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
-
+  p->priority = 1;
+  p->pass = 0;
   return p;
 }
 
@@ -100,6 +141,9 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+#ifndef __ORIGINAL_SCHED__
+  penqueue(p);
+#endif
 }
 
 // Grow current process's memory by n bytes.
@@ -161,6 +205,9 @@ fork(void)
   // lock to force the compiler to emit the np->state write last.
   acquire(&ptable.lock);
   np->state = RUNNABLE;
+#ifndef __ORIGINAL_SCHED__
+  penqueue(np);
+#endif
   release(&ptable.lock);
   
   return pid;
@@ -273,14 +320,24 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+
+#ifndef __ORIGINAL_SCHED__
+    p = pdequeue();
+    if(p){
+#else
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
+#endif
+
+      // For debug, checking the scheduled process priority
+      cprintf("cpu %d get process %s, process prio = %d\n",cpunum(),p->name,p->priority);
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
       proc = p;
+
       switchuvm(p);
       p->state = RUNNING;
       swtch(&cpu->scheduler, proc->context);
@@ -291,7 +348,6 @@ scheduler(void)
       proc = 0;
     }
     release(&ptable.lock);
-
   }
 }
 
@@ -321,6 +377,9 @@ yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
   proc->state = RUNNABLE;
+#ifndef __ORIGINAL_SCHED__
+  penqueue(proc);
+#endif
   sched();
   release(&ptable.lock);
 }
@@ -351,6 +410,7 @@ forkret(void)
 void
 sleep(void *chan, struct spinlock *lk)
 {
+
   if(proc == 0)
     panic("sleep");
 
@@ -392,8 +452,12 @@ wakeup1(void *chan)
   struct proc *p;
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
+    if(p->state == SLEEPING && p->chan == chan){
       p->state = RUNNABLE;
+#ifndef __ORIGINAL_SCHED__
+      penqueue(p);
+#endif
+    }
 }
 
 // Wake up all processes sleeping on chan.
@@ -418,8 +482,12 @@ kill(int pid)
     if(p->pid == pid){
       p->killed = 1;
       // Wake process from sleep if necessary.
-      if(p->state == SLEEPING)
+      if(p->state == SLEEPING){
         p->state = RUNNABLE;
+#ifndef __ORIGINAL_SCHED__
+        penqueue(p);
+#endif
+      }
       release(&ptable.lock);
       return 0;
     }
