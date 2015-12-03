@@ -92,9 +92,6 @@ exec(char *path, char **argv)
   proc->sz = sz;
   proc->tf->eip = elf.entry;  // main
   proc->tf->esp = sp;
-
-  cprintf("%s created by cpu %d\n",proc->name,cpunum());
-
   switchuvm(proc);
   freevm(oldpgdir);
   return 0;

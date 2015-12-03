@@ -7,8 +7,6 @@
 #include "mmu.h"
 #include "proc.h"
 
-extern pde_t *kpgdir;
-
 int
 sys_fork(void)
 {
@@ -104,16 +102,6 @@ sys_halt(void)
   for( ; *p; p++)
     outw(0xB004, 0x2000);
   return 0;
-}
-
-int
-sys_getpte(void)
-{
-  int va;
-  if(argint(0, &va) < 0)
-    return -1;
-  uint *ret = (uint *) walkpgdir(proc->pgdir,(void *)va, 0);
-  return (int) *ret;
 }
 
 int
