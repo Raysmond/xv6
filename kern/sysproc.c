@@ -103,3 +103,13 @@ sys_halt(void)
     outw(0xB004, 0x2000);
   return 0;
 }
+
+int
+sys_setprio(void)
+{
+  int prio;
+  if(argint(0, &prio) < 0)
+    return -1;
+  proc->priority = prio;
+  return 0;
+}
