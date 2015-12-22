@@ -154,7 +154,7 @@ kalloc(void)
 }
 
 char*
-alloc_slab(void)
+alloc_slab()
 {
   if (slab.nfreeblock == 0) slabinit();
   if (slab.use_lock)
