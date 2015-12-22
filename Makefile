@@ -87,6 +87,9 @@ xv6.img: bootblock kernel fs.img
 	dd if=bootblock of=xv6.img conv=notrunc
 	dd if=kernel of=xv6.img seek=1 conv=notrunc
 
+swap.img: xv6.img
+	dd if=/dev/zero of=swap.img bs=1M count=128
+
 xv6memfs.img: bootblock kernelmemfs
 	dd if=/dev/zero of=xv6memfs.img count=10000
 	dd if=bootblock of=xv6memfs.img conv=notrunc
@@ -213,7 +216,7 @@ clean:
 	*.o *.d *.asm *.sym vectors.S bootblock entryother \
 	drivers/*.o drivers/*.d programs/*.o programs/*.d lib/*.o \
 	lib/*.d user/*.o user/*.d kern/*.d kern/*.o\
-	initcode initcode.out kernel xv6.img fs.img kernelmemfs mkfs \
+	initcode initcode.out kernel xv6.img fs.img swap.img kernelmemfs mkfs \
 	.gdbinit \
 	$(UPROGS)
 
@@ -242,25 +245,25 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 ifndef CPUS
 CPUS := 2
 endif
-QEMUOPTS = -hdb fs.img xv6.img -smp $(CPUS) -m 512 $(QEMUEXTRA)
-
-qemu: fs.img xv6.img
+#QEMUOPTS = -hdb fs.img xv6.img -smp $(CPUS) -m 512 $(QEMUEXTRA)
+QEMUOPTS = -drive file=swap.img,index=2,format=raw -drive file=fs.img,index=1,format=raw -drive file=xv6.img,index=0,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+qemu: fs.img xv6.img swap.img
 	$(QEMU) -serial mon:stdio $(QEMUOPTS)
 
 qemu-memfs: xv6memfs.img
 	$(QEMU) xv6memfs.img -smp $(CPUS) -m 256
 
-qemu-nox: fs.img xv6.img
+qemu-nox: fs.img xv6.img swap.img
 	$(QEMU) -nographic $(QEMUOPTS)
 
 .gdbinit: tools/.gdbinit.tmpl
 	sed "s/localhost:1234/localhost:$(GDBPORT)/" < $^ > $@
 
-qemu-gdb: fs.img xv6.img .gdbinit
+qemu-gdb: fs.img xv6.img swap.img .gdbinit
 	@echo "*** Now run 'gdb'." 1>&2
 	$(QEMU) -serial mon:stdio $(QEMUOPTS) -S $(QEMUGDB)
 
-qemu-nox-gdb: fs.img xv6.img .gdbinit
+qemu-nox-gdb: fs.img xv6.img swap.img .gdbinit
 	@echo "*** Now run 'gdb'." 1>&2
 	$(QEMU) -nographic $(QEMUOPTS) -S $(QEMUGDB)
 
