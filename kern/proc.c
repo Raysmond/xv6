@@ -33,7 +33,7 @@ static void pqueue_init()
   pheap_init();
 }
 
-static int pqueue_size() 
+static int pqueue_size()
 {
   return pheap.size;
 }
@@ -48,7 +48,7 @@ static int penqueue(struct proc *p)
 static struct proc* pdequeue()
 {
   struct proc *p;
-  
+
   if(pqueue_size() == 0) return 0;
   else{
     p = pheap_pop();
@@ -95,11 +95,11 @@ found:
     return 0;
   }
   sp = p->kstack + KSTACKSIZE;
-  
+
   // Leave room for trap frame.
   sp -= sizeof *p->tf;
   p->tf = (struct trapframe*)sp;
-  
+
   // Set up new context to start executing at forkret,
   // which returns to trapret.
   sp -= 4;
@@ -121,7 +121,7 @@ userinit(void)
 {
   struct proc *p;
   extern char _binary_initcode_start[], _binary_initcode_size[];
-  
+
   p = allocproc();
   initproc = p;
   if((p->pgdir = setupkvm()) == 0)
@@ -152,13 +152,13 @@ int
 growproc(int n)
 {
   uint sz;
-  
+
   sz = proc->sz;
   if(n > 0){
     if((sz = allocuvm(proc->pgdir, sz, sz + n)) == 0)
       return -1;
   } else if(n < 0){
-    if((sz = deallocuvm(proc->pgdir, sz, sz + n)) == 0)
+    if((sz = deallocuvm(proc->pgdir, sz, sz + n, proc->pid)) == 0)
       return -1;
   }
   proc->sz = sz;
@@ -180,7 +180,7 @@ fork(void)
     return -1;
 
   // Copy process state from p.
-  if((np->pgdir = copyuvm(proc->pgdir, proc->sz)) == 0){
+  if((np->pgdir = copyuvm(proc->pgdir, proc->sz, np->pid)) == 0){
     kfree(np->kstack);
     np->kstack = 0;
     np->state = UNUSED;
@@ -199,7 +199,7 @@ fork(void)
   np->cwd = idup(proc->cwd);
 
   safestrcpy(np->name, proc->name, sizeof(proc->name));
- 
+
   pid = np->pid;
 
   // lock to force the compiler to emit the np->state write last.
@@ -209,7 +209,7 @@ fork(void)
   penqueue(np);
 #endif
   release(&ptable.lock);
-  
+
   return pid;
 }
 
@@ -279,7 +279,7 @@ wait(void)
         pid = p->pid;
         kfree(p->kstack);
         p->kstack = 0;
-        freevm(p->pgdir);
+        freevm(p->pgdir, pid);
         p->state = UNUSED;
         p->pid = 0;
         p->parent = 0;
@@ -331,7 +331,7 @@ scheduler(void)
 #endif
 
       // For debug, checking the scheduled process priority
-      cprintf("cpu %d get process %s, process prio = %d\n",cpunum(),p->name,p->priority);
+      // cprintf("cpu %d get process %s, process prio = %d\n",cpunum(),p->name,p->priority);
 
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
@@ -395,13 +395,13 @@ forkret(void)
 
   if (first) {
     // Some initialization functions must be run in the context
-    // of a regular process (e.g., they call sleep), and thus cannot 
+    // of a regular process (e.g., they call sleep), and thus cannot
     // be run from main().
     first = 0;
     iinit(ROOTDEV);
     initlog(ROOTDEV);
   }
-  
+
   // Return to "caller", actually trapret (see allocproc).
 }
 
@@ -515,7 +515,7 @@ procdump(void)
   struct proc *p;
   char *state;
   uint pc[10];
-  
+
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
     if(p->state == UNUSED)
       continue;

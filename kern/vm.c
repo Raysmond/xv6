@@ -6,10 +6,40 @@
 #include "mmu.h"
 #include "proc.h"
 #include "elf.h"
+#include "queue.h"
+#include "spinlock.h"
+
+#define SWAPSIZE 0x8000000  //128MB swap area
+#define SLOTSIZE SWAPSIZE/PGSIZE  // number of slots
+#define PR_FIFO 1
+#define PR_SCND 2
+#define PR_ALGO PR_FIFO
 
 extern char data[];  // defined by kernel.ld
 pde_t *kpgdir;  // for use in scheduler()
 struct segdesc gdt[NSEGS];
+
+typedef Q_HEAD(page_entry_list, page_entry) q_head;
+typedef Q_ENTRY(page_entry) q_entry;
+
+struct page_entry{
+    pte_t * ptr_pte;
+    // we can't actually use pointer to pte
+    // because in page_out, it's not the same page table
+    uint pn_pid;
+    uint ref;  // reference bit
+    q_entry link;
+};
+
+struct {
+    q_head qhead;
+    struct spinlock lock;
+} queue;
+
+struct {
+    uint slots[SLOTSIZE];
+    struct spinlock lock;
+} swap_map;
 
 // Set up CPU's kernel segment descriptors.
 // Run once on entry on each CPU.
@@ -33,7 +63,7 @@ seginit(void)
 
   lgdt(c->gdt, sizeof(c->gdt));
   loadgs(SEG_KCPU << 3);
-  
+
   // Initialize cpu-local storage.
   cpu = c;
   proc = 0;
@@ -57,11 +87,123 @@ walkpgdir(pde_t *pgdir, const void *va, int alloc)
     // Make sure all those PTE_P bits are zero.
     memset(pgtab, 0, PGSIZE);
     // The permissions here are overly generous, but they can
-    // be further restricted by the permissions in the page table 
+    // be further restricted by the permissions in the page table
     // entries, if necessary.
     *pde = v2p(pgtab) | PTE_P | PTE_W | PTE_U;
   }
   return &pgtab[PTX(va)];
+}
+
+uint
+alloc_slot(uint pn_pid)
+{
+    acquire(&swap_map.lock);
+    uint i = 0;
+    for (; i < SLOTSIZE; i++)
+    {
+        if (swap_map.slots[i] == 0) break;
+    }
+    if (i == SLOTSIZE)
+        panic("swap: no free slot");
+    swap_map.slots[i] = pn_pid;
+    release(&swap_map.lock);
+    return i<<3;
+}
+
+uint
+get_slot(uint pn_pid)
+{
+    uint i = 0;
+    for (; i < SLOTSIZE; i++)
+        if (swap_map.slots[i] == pn_pid)
+            return i<<3;
+    panic("swap: slot not found");
+}
+
+void
+rm_slot(uint slotn)
+{
+    acquire(&swap_map.lock);
+    uint i = slotn>>3;
+    if (i >= SLOTSIZE)
+        panic("swap: release non-exist slot");
+    swap_map.slots[i] = 0;
+    release(&swap_map.lock);
+}
+
+void
+rm_page_slot(uint pn_pid)
+{
+    acquire(&swap_map.lock);
+    uint i = 0;
+    for (; i < SLOTSIZE; i++)
+        if (swap_map.slots[i] == pn_pid){
+            swap_map.slots[i] = 0;
+            break;
+        }
+    release(&swap_map.lock);
+}
+
+void
+add_page(pte_t *p, char *va, uint pid)
+{
+    acquire(&queue.lock);
+    struct page_entry *e = (struct page_entry *)alloc_slab();
+    e->ptr_pte = p;
+    e->pn_pid = (uint)va | pid;
+    e->ref = *p & PTE_A;
+    Q_INSERT_TAIL(&queue.qhead, e, link);
+    release(&queue.lock);
+}
+
+void
+rm_page(uint pn_pid, uint release_slot)
+{
+    acquire(&queue.lock);
+    struct page_entry *e;
+    Q_FOREACH(e, &queue.qhead, link) {
+        if (e->pn_pid == pn_pid) {
+            if (release_slot) rm_page_slot(e->pn_pid);
+            Q_REMOVE(&queue.qhead, e, link);
+            break;
+        }
+    }
+    release(&queue.lock);
+}
+
+struct page_entry *
+get_page()
+{
+    acquire(&queue.lock);
+    struct page_entry *e;
+    if (PR_ALGO != PR_SCND) goto ret;
+    Q_FOREACH(e, &queue.qhead, link) {
+        if (e->ref == PTE_A) e->ref = 0;
+        else{
+            release(&queue.lock);
+            return e;
+        }
+    }
+
+ret:
+    e = Q_FIRST(&queue.qhead);
+    release(&queue.lock);
+    return e;
+}
+
+pte_t *
+getpte(pde_t *pgdir, const void *va)
+{
+    pde_t *pde;
+    pte_t *pgtab;
+
+    pde = &pgdir[PDX(va)];
+    if(*pde & PTE_P){
+        pgtab = (pte_t*)p2v(PTE_ADDR(*pde));
+    } else {
+        return 0;
+    }
+    return &pgtab[PTX(va)];
 }
 
 // Create PTEs for virtual addresses starting at va that refer to
@@ -72,7 +214,6 @@ mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
 {
   char *a, *last;
   pte_t *pte;
-  
   a = (char*)PGROUNDDOWN((uint)va);
   last = (char*)PGROUNDDOWN(((uint)va) + size - 1);
   for(;;){
@@ -89,12 +230,44 @@ mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
   return 0;
 }
 
+void
+write_ref(struct proc *p)
+{
+    acquire(&queue.lock);
+    struct page_entry *e;
+    Q_FOREACH(e, &queue.qhead, link) {
+        if (PTE_FLAGS(e->pn_pid) != proc->pid) continue;
+        uint pa = PTE_ADDR(*(e->ptr_pte));
+        pte_t *p = getpte(proc->pgdir, (char*)p2v(pa));
+        if (p == 0)
+            panic("write_ref: PTE should exist");
+        *p = ((*p) & (0xffffffff ^ PTE_A)) | (e->ref);
+    }
+    release(&queue.lock);
+}
+
+void
+read_ref()
+{
+    acquire(&queue.lock);
+    struct page_entry *e;
+    Q_FOREACH(e, &queue.qhead, link) {
+        if (PTE_FLAGS(e->pn_pid) != proc->pid) continue;
+        uint pa = PTE_ADDR(*(e->ptr_pte));
+        pte_t *p = getpte(proc->pgdir, (char*)p2v(pa));
+        if (p == 0)
+            panic("read_ref: PTE should exist");
+        e->ref = (*p) & PTE_A;
+    }
+    release(&queue.lock);
+}
+
 // There is one page table per process, plus one that's used when
 // a CPU is not running any process (kpgdir). The kernel uses the
 // current process's page table during system calls and interrupts;
 // page protection bits prevent user code from using the kernel's
 // mappings.
-// 
+//
 // setupkvm() and exec() set up every page table like this:
 //
 //   0..KERNBASE: user memory (text+data+stack+heap), mapped to
@@ -102,7 +275,7 @@ mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
 //   KERNBASE..KERNBASE+EXTMEM: mapped to 0..EXTMEM (for I/O space)
 //   KERNBASE+EXTMEM..data: mapped to EXTMEM..V2P(data)
 //                for the kernel's instructions and r/o data
-//   data..KERNBASE+PHYSTOP: mapped to V2P(data)..PHYSTOP, 
+//   data..KERNBASE+PHYSTOP: mapped to V2P(data)..PHYSTOP,
 //                                  rw data + free physical memory
 //   0xfe000000..0: mapped direct (devices such as ioapic)
 //
@@ -137,9 +310,11 @@ setupkvm(void)
   if (p2v(PHYSTOP) > (void*)DEVSPACE)
     panic("PHYSTOP too high");
   for(k = kmap; k < &kmap[NELEM(kmap)]; k++)
-    if(mappages(pgdir, k->virt, k->phys_end - k->phys_start, 
+  {
+      if(mappages(pgdir, k->virt, k->phys_end - k->phys_start,
                 (uint)k->phys_start, k->perm) < 0)
       return 0;
+  }
   return pgdir;
 }
 
@@ -157,6 +332,7 @@ kvmalloc(void)
 void
 switchkvm(void)
 {
+  if (!Q_EMPTY(&queue.qhead)) read_ref();
   lcr3(v2p(kpgdir));   // switch to the kernel page table
 }
 
@@ -164,6 +340,7 @@ switchkvm(void)
 void
 switchuvm(struct proc *p)
 {
+  write_ref(p);
   pushcli();
   cpu->gdt[SEG_TSS] = SEG16(STS_T32A, &cpu->ts, sizeof(cpu->ts)-1, 0);
   cpu->gdt[SEG_TSS].s = 0;
@@ -182,7 +359,7 @@ void
 inituvm(pde_t *pgdir, char *init, uint sz)
 {
   char *mem;
-  
+
   if(sz >= PGSIZE)
     panic("inituvm: more than a page");
   mem = kalloc();
@@ -227,17 +404,20 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
     return 0;
   if(newsz < oldsz)
     return oldsz;
-
   a = PGROUNDUP(oldsz);
   for(; a < newsz; a += PGSIZE){
     mem = kalloc();
+    memset(mem, 0, PGSIZE);
     if(mem == 0){
       cprintf("allocuvm out of memory\n");
-      deallocuvm(pgdir, newsz, oldsz);
+      deallocuvm(pgdir, newsz, oldsz, proc->pid);
       return 0;
     }
-    memset(mem, 0, PGSIZE);
+    //cprintf("alloc %d %x\n", proc->pid, mem);
     mappages(pgdir, (char*)a, PGSIZE, v2p(mem), PTE_W|PTE_U);
+    pte_t * p = getpte(pgdir, (char*)a);
+    if (a > PGROUNDUP(oldsz))
+        if (*p &PTE_U) add_page(p, (char *)a, proc->pid);
   }
   return newsz;
 }
@@ -247,14 +427,13 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
 // need to be less than oldsz.  oldsz can be larger than the actual
 // process size.  Returns the new process size.
 int
-deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
+deallocuvm(pde_t *pgdir, uint oldsz, uint newsz, uint pid)
 {
   pte_t *pte;
   uint a, pa;
 
   if(newsz >= oldsz)
     return oldsz;
-
   a = PGROUNDUP(newsz);
   for(; a  < oldsz; a += PGSIZE){
     pte = walkpgdir(pgdir, (char*)a, 0);
@@ -265,6 +444,7 @@ deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
       if(pa == 0)
         panic("kfree");
       char *v = p2v(pa);
+      rm_page(a|pid, 1);
       kfree(v);
       *pte = 0;
     }
@@ -275,13 +455,12 @@ deallocuvm(pde_t *pgdir, uint oldsz, uint newsz)
 // Free a page table and all the physical memory pages
 // in the user part.
 void
-freevm(pde_t *pgdir)
+freevm(pde_t *pgdir, uint pid)
 {
   uint i;
-
   if(pgdir == 0)
     panic("freevm: no pgdir");
-  deallocuvm(pgdir, KERNBASE, 0);
+  deallocuvm(pgdir, KERNBASE, 0, pid);
   for(i = 0; i < NPDENTRIES; i++){
     if(pgdir[i] & PTE_P){
       char * v = p2v(PTE_ADDR(pgdir[i]));
@@ -307,20 +486,22 @@ clearpteu(pde_t *pgdir, char *uva)
 // Given a parent process's page table, create a copy
 // of it for a child.
 pde_t*
-copyuvm(pde_t *pgdir, uint sz)
+copyuvm(pde_t *pgdir, uint sz, uint pid)
 {
   pde_t *d;
   pte_t *pte;
   uint pa, i, flags;
   char *mem;
-
   if((d = setupkvm()) == 0)
     return 0;
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
       panic("copyuvm: pte should exist");
     if(!(*pte & PTE_P))
-      panic("copyuvm: page not present");
+    {
+        page_in(i);
+      //panic("copyuvm: page not present");
+    }
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -328,11 +509,15 @@ copyuvm(pde_t *pgdir, uint sz)
     memmove(mem, (char*)p2v(pa), PGSIZE);
     if(mappages(d, (void*)i, PGSIZE, v2p(mem), flags) < 0)
       goto bad;
+    pte_t * p = getpte(d, (char*)i);
+    if (i>0)
+        if (*p &PTE_U) add_page(p, (char*)i, pid);
+    //cprintf("copy alloc %d %x\n", pid, mem);
   }
   return d;
 
 bad:
-  freevm(d);
+  freevm(d, proc->pid);
   return 0;
 }
 
@@ -377,10 +562,59 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
   return 0;
 }
 
-//PAGEBREAK!
-// Blank page.
-//PAGEBREAK!
-// Blank page.
-//PAGEBREAK!
-// Blank page.
+int
+do_pgflt(uint va)
+{
+    va = PGROUNDDOWN(va);
+    cprintf("fault addr %x\n", va);
+    if (va < KERNBASE + proc->sz)
+    {
+        page_in(va);
+        return 0;
+    }
+    else
+      return -1;
+}
 
+void
+swapinit()
+{
+    Q_INIT(&queue.qhead);
+    initlock(&swap_map.lock, "swap_map");
+    initlock(&queue.lock, "queue");
+}
+
+void
+page_in(uint va)
+{
+    char *mem = kalloc();
+    if (mem == 0)
+        panic("paging: no memory to page in");
+
+    pte_t *p = getpte(proc->pgdir, (char*)va);      // get PTE
+    if (p == 0)
+        panic("paging: pte should exist");
+    uint slotn = get_slot(va | (proc->pid));        // get the slot id using pte
+    read_swap(slotn, (char *)mem);                  // read in page
+    rm_slot(slotn);                                 // release slot
+    *p = v2p(mem)| PTE_FLAGS(*p) |PTE_P ;           // recover pte
+    add_page(p, (char *)va, proc->pid);             // add to swappable list
+    cprintf("page in %x\n", va);
+}
+
+void
+page_out()
+{
+    if (Q_EMPTY(&queue.qhead)) {
+        panic("paging: no page to page out");
+    }
+    struct page_entry *e = get_page();              // get a page to page out
+    pte_t *p = e->ptr_pte;                          // get PTE
+    uint pa = PTE_ADDR(*p);                         // get memory address
+    *p ^= PTE_P;                                    // set present bit to 0
+    uint slotn = alloc_slot(e->pn_pid);             // alloc a slot on disk
+    write_swap(slotn, (char *)p2v(pa));             // write page to disk
+    kfree(p2v(pa));                                 // free memory
+    rm_page(e->pn_pid, 0);                             // remove page entry
+    cprintf("page out %x\n", e->pn_pid);
+}
